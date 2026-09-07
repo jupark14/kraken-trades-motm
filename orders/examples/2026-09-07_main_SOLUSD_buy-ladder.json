@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "account": "main",
+  "description": "SOLUSD buy ladder \u2014 5 levels, total 10",
+  "generated_by": "kraken.py split ladder --pair SOLUSD --side buy --total-volume 10 --levels 5 --price-start 95 --price-end 75 --oflags post --account main -o orders/examples/2026-09-07_main_SOLUSD_buy-ladder.json",
+  "created": "2026-09-07T15:14:29Z",
+  "orders": [
+    {
+      "label": "L1 \u2014 limit buy 20.0% @ 95.00",
+      "pair": "SOLUSD",
+      "type": "buy",
+      "ordertype": "limit",
+      "price": "95.00",
+      "volume": "2.00000000",
+      "oflags": "post",
+      "timeinforce": "GTC"
+    },
+    {
+      "label": "L2 \u2014 limit buy 20.0% @ 90.00",
+      "pair": "SOLUSD",
+      "type": "buy",
+      "ordertype": "limit",
+      "price": "90.00",
+      "volume": "2.00000000",
+      "oflags": "post",
+      "timeinforce": "GTC"
+    },
+    {
+      "label": "L3 \u2014 limit buy 20.0% @ 85.00",
+      "pair": "SOLUSD",
+      "type": "buy",
+      "ordertype": "limit",
+      "price": "85.00",
+      "volume": "2.00000000",
+      "oflags": "post",
+      "timeinforce": "GTC"
+    },
+    {
+      "label": "L4 \u2014 limit buy 20.0% @ 80.00",
+      "pair": "SOLUSD",
+      "type": "buy",
+      "ordertype": "limit",
+      "price": "80.00",
+      "volume": "2.00000000",
+      "oflags": "post",
+      "timeinforce": "GTC"
+    },
+    {
+      "label": "L5 \u2014 limit buy 20.0% @ 75.00",
+      "pair": "SOLUSD",
+      "type": "buy",
+      "ordertype": "limit",
+      "price": "75.00",
+      "volume": "2.00000000",
+      "oflags": "post",
+      "timeinforce": "GTC"
+    }
+  ]
+}

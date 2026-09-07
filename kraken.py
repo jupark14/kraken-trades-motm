@@ -1,0 +1,904 @@
+#!/usr/bin/env python3
+"""
+Kraken order-management CLI for one or two Kraken accounts.
+
+Dry-run is always the default. --live requires typing CONFIRM.
+See CLAUDE.md for the standard workflow and safety rules, and SETUP.md
+for first-time setup.
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN
+from pathlib import Path
+
+import krakenex
+from dotenv import load_dotenv
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ACCOUNTS_FILE = SCRIPT_DIR / "accounts.json"
+LOG_FILE = SCRIPT_DIR / "logs" / "trade_log.jsonl"
+
+# Kraken AddOrder parameters we allow in order files. Anything else aborts —
+# a typo like "pricee" must never be silently dropped on the way to the API.
+ALLOWED_ORDER_KEYS = {
+    "label", "pair", "type", "ordertype", "price", "price2",
+    "volume", "displayvol", "oflags", "trigger", "timeinforce",
+}
+REQUIRED_ORDER_KEYS = {"pair", "type", "ordertype", "volume"}
+
+# ordertype -> (price fields required, price fields forbidden)
+ORDERTYPE_PRICES = {
+    "market":              (set(), {"price", "price2"}),
+    "limit":               ({"price"}, {"price2"}),
+    "stop-loss":           ({"price"}, {"price2"}),
+    "take-profit":         ({"price"}, {"price2"}),
+    "trailing-stop":       ({"price"}, {"price2"}),
+    "stop-loss-limit":     ({"price", "price2"}, set()),
+    "take-profit-limit":   ({"price", "price2"}, set()),
+    "trailing-stop-limit": ({"price", "price2"}, set()),
+}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _abort(msg: str) -> None:
+    print(f"\nABORTED: {msg}")
+    sys.exit(1)
+
+
+def _assert_no_error(resp: dict, endpoint: str) -> None:
+    if resp.get("error"):
+        _abort(f"Kraken {endpoint} returned error: {resp['error']}")
+
+
+# ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+
+def load_accounts() -> dict:
+    if not ACCOUNTS_FILE.exists():
+        _abort(f"accounts.json not found at {ACCOUNTS_FILE}")
+    with open(ACCOUNTS_FILE) as f:
+        return json.load(f)["accounts"]
+
+
+def get_api(account_name: str) -> krakenex.API:
+    """Build an authenticated API client for a named account. Prints a banner
+    so it is always visible which account a private call is about to touch."""
+    accounts = load_accounts()
+    if account_name not in accounts:
+        _abort(
+            f"Unknown account '{account_name}'. "
+            f"Valid accounts: {', '.join(sorted(accounts))}"
+        )
+    acct = accounts[account_name]
+    load_dotenv(SCRIPT_DIR / ".env")
+    key = os.environ.get(acct["key_env"])
+    secret = os.environ.get(acct["secret_env"])
+    if not key or not secret:
+        _abort(
+            f"Account '{account_name}' needs {acct['key_env']} and "
+            f"{acct['secret_env']} set in .env"
+        )
+    print(f"Account: {account_name} — {acct.get('description', '')}\n")
+    return krakenex.API(key=key, secret=secret)
+
+
+def get_public_api() -> krakenex.API:
+    return krakenex.API()
+
+
+# ---------------------------------------------------------------------------
+# Market data helpers
+# ---------------------------------------------------------------------------
+
+def fetch_pair_info(api: krakenex.API, pairs: list) -> dict:
+    """Return {requested_pair: pair_info_dict}. Kraken may respond under
+    normalized keys, so match results back to requests via altname/wsname."""
+    resp = api.query_public("AssetPairs", {"pair": ",".join(pairs)})
+    _assert_no_error(resp, "AssetPairs")
+    results = list(resp["result"].values())
+    out = {}
+    for req in pairs:
+        match = None
+        for info in results:
+            names = {info.get("altname", ""), info.get("wsname", "").replace("/", "")}
+            if req in names:
+                match = info
+                break
+        if match is None and len(pairs) == 1 and len(results) == 1:
+            match = results[0]
+        if match is None:
+            _abort(f"Pair '{req}' not found in AssetPairs response")
+        out[req] = match
+    return out
+
+
+def fetch_last_price(api: krakenex.API, pair: str) -> Decimal:
+    resp = api.query_public("Ticker", {"pair": pair})
+    _assert_no_error(resp, "Ticker")
+    ticker = next(iter(resp["result"].values()))
+    return Decimal(ticker["c"][0])
+
+
+# ---------------------------------------------------------------------------
+# Read-only commands
+# ---------------------------------------------------------------------------
+
+def cmd_balance(args) -> None:
+    api = get_api(args.account)
+    resp = api.query_private("Balance")
+    _assert_no_error(resp, "Balance")
+    balances = {k: Decimal(v) for k, v in resp["result"].items()}
+    nonzero = {k: v for k, v in balances.items() if v != 0}
+    if not nonzero:
+        print("No non-zero balances.")
+        return
+    print(f"{'Asset':<12} {'Balance':>24}")
+    print("-" * 38)
+    for asset in sorted(nonzero):
+        print(f"{asset:<12} {nonzero[asset]:>24,f}")
+
+
+def cmd_ticker(args) -> None:
+    api = get_public_api()
+    for pair in args.pairs:
+        resp = api.query_public("Ticker", {"pair": pair})
+        if resp.get("error"):
+            print(f"{pair:<12} ERROR: {resp['error']}")
+            continue
+        t = next(iter(resp["result"].values()))
+        print(
+            f"{pair:<12} last={t['c'][0]}  bid={t['b'][0]}  ask={t['a'][0]}  "
+            f"24h: low={t['l'][1]} high={t['h'][1]} vol={t['v'][1]}"
+        )
+
+
+def cmd_pair_info(args) -> None:
+    api = get_public_api()
+    info = fetch_pair_info(api, [args.pair])[args.pair]
+    print(f"Pair            : {args.pair} ({info.get('wsname', '')})")
+    print(f"Base / Quote    : {info.get('base')} / {info.get('quote')}")
+    print(f"Min order size  : {info.get('ordermin')}")
+    print(f"Min order cost  : {info.get('costmin', 'n/a')}")
+    print(f"Lot decimals    : {info.get('lot_decimals')}  (volume precision)")
+    print(f"Pair decimals   : {info.get('pair_decimals')}  (price precision)")
+    print(f"Order types     : {', '.join(sorted(ORDERTYPE_PRICES))}")
+
+
+def _print_order_rows(orders: dict) -> None:
+    if not orders:
+        print("(none)")
+        return
+    print(f"{'TxID':<22} {'Pair':<10} {'Type':<5} {'Ordertype':<20} "
+          f"{'Price':>14} {'Volume':>18} {'Filled':>18} {'Status':<8}")
+    print("-" * 122)
+    for txid, o in orders.items():
+        d = o.get("descr", {})
+        print(
+            f"{txid:<22} {d.get('pair', ''):<10} {d.get('type', ''):<5} "
+            f"{d.get('ordertype', ''):<20} {d.get('price', ''):>14} "
+            f"{o.get('vol', ''):>18} {o.get('vol_exec', ''):>18} "
+            f"{o.get('status', 'open'):<8}"
+        )
+
+
+def cmd_open_orders(args) -> None:
+    api = get_api(args.account)
+    resp = api.query_private("OpenOrders")
+    _assert_no_error(resp, "OpenOrders")
+    orders = resp["result"].get("open", {})
+    print(f"Open orders: {len(orders)}\n")
+    _print_order_rows(orders)
+
+
+def cmd_closed_orders(args) -> None:
+    api = get_api(args.account)
+    resp = api.query_private("ClosedOrders")
+    _assert_no_error(resp, "ClosedOrders")
+    closed = resp["result"].get("closed", {})
+    items = sorted(closed.items(), key=lambda kv: kv[1].get("closetm", 0), reverse=True)
+    items = items[: args.count]
+    print(f"Closed orders (most recent {len(items)}):\n")
+    _print_order_rows(dict(items))
+
+
+def cmd_trades(args) -> None:
+    api = get_api(args.account)
+    resp = api.query_private("TradesHistory")
+    _assert_no_error(resp, "TradesHistory")
+    trades = resp["result"].get("trades", {})
+    items = sorted(trades.items(), key=lambda kv: kv[1].get("time", 0), reverse=True)
+    items = items[: args.count]
+    print(f"Recent fills (most recent {len(items)}):\n")
+    if not items:
+        print("(none)")
+        return
+    print(f"{'Time (UTC)':<20} {'Pair':<10} {'Type':<5} {'Price':>14} "
+          f"{'Volume':>18} {'Cost':>14} {'Fee':>10}")
+    print("-" * 98)
+    for _, t in items:
+        ts = datetime.fromtimestamp(t["time"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"{ts:<20} {t.get('pair', ''):<10} {t.get('type', ''):<5} "
+            f"{t.get('price', ''):>14} {t.get('vol', ''):>18} "
+            f"{t.get('cost', ''):>14} {t.get('fee', ''):>10}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Order-file loading and validation
+# ---------------------------------------------------------------------------
+
+def load_order_file(path: str, account: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        _abort(f"Order file not found: {path}")
+    with open(p) as f:
+        try:
+            doc = json.load(f)
+        except json.JSONDecodeError as e:
+            _abort(f"Order file is not valid JSON: {e}")
+
+    if doc.get("account") != account:
+        _abort(
+            f"Account mismatch: order file says account "
+            f"'{doc.get('account')}' but --account is '{account}'. "
+            f"Both must agree before anything is sent."
+        )
+    orders = doc.get("orders")
+    if not isinstance(orders, list) or not orders:
+        _abort("Order file has no 'orders' list")
+
+    for i, order in enumerate(orders, 1):
+        label = order.get("label", f"order {i}")
+        unknown = set(order) - ALLOWED_ORDER_KEYS
+        if unknown:
+            _abort(f"{label}: unknown key(s) {sorted(unknown)} — "
+                   f"allowed: {sorted(ALLOWED_ORDER_KEYS)}")
+        missing = REQUIRED_ORDER_KEYS - set(order)
+        if missing:
+            _abort(f"{label}: missing required key(s) {sorted(missing)}")
+        for k, v in order.items():
+            if not isinstance(v, str):
+                _abort(f"{label}: value for '{k}' must be a quoted string "
+                       f"(got {type(v).__name__}) — numbers as strings, always")
+        if order["type"] not in ("buy", "sell"):
+            _abort(f"{label}: type must be 'buy' or 'sell'")
+        ot = order["ordertype"]
+        if ot not in ORDERTYPE_PRICES:
+            _abort(f"{label}: unsupported ordertype '{ot}'. "
+                   f"Supported: {', '.join(sorted(ORDERTYPE_PRICES))}")
+        required, forbidden = ORDERTYPE_PRICES[ot]
+        for field in required:
+            if field not in order:
+                _abort(f"{label}: ordertype '{ot}' requires '{field}'")
+        for field in forbidden:
+            if field in order:
+                _abort(f"{label}: ordertype '{ot}' must not have '{field}'")
+    return doc
+
+
+def _build_api_params(order: dict) -> dict:
+    return {k: v for k, v in order.items() if k != "label"}
+
+
+# ---------------------------------------------------------------------------
+# Preflight: local checks before anything is sent to Kraken
+# ---------------------------------------------------------------------------
+
+def run_preflight(api: krakenex.API, doc: dict) -> None:
+    orders = doc["orders"]
+    pairs = sorted({o["pair"] for o in orders})
+
+    print("=" * 60)
+    print("PRE-FLIGHT CHECKS")
+    print("=" * 60)
+
+    print(f"\n[1/4] Fetching pair specifications for {', '.join(pairs)}...")
+    pair_info = fetch_pair_info(api, pairs)
+    for pair in pairs:
+        info = pair_info[pair]
+        print(f"      {pair}: min={info.get('ordermin')}  "
+              f"lot_decimals={info.get('lot_decimals')}  "
+              f"pair_decimals={info.get('pair_decimals')}")
+
+    print("\n[2/4] Fetching current prices...")
+    prices = {}
+    for pair in pairs:
+        prices[pair] = fetch_last_price(api, pair)
+        print(f"      {pair}: last = {prices[pair]}")
+
+    print("\n[3/4] Checking balances...")
+    resp = api.query_private("Balance")
+    _assert_no_error(resp, "Balance")
+    balances = {k: Decimal(v) for k, v in resp["result"].items()}
+
+    sell_needed = {}   # base asset -> volume required
+    buy_cost = {}      # quote asset -> estimated cost
+    for o in orders:
+        info = pair_info[o["pair"]]
+        if o["type"] == "sell":
+            base = info["base"]
+            sell_needed[base] = sell_needed.get(base, Decimal(0)) + Decimal(o["volume"])
+        else:
+            quote = info["quote"]
+            price_str = o.get("price", "")
+            price = Decimal(price_str) if price_str and not price_str.startswith(("+", "-")) \
+                else prices[o["pair"]]
+            buy_cost[quote] = buy_cost.get(quote, Decimal(0)) + price * Decimal(o["volume"])
+
+    for asset, needed in sell_needed.items():
+        have = balances.get(asset, Decimal(0))
+        if have < needed:
+            _abort(f"Insufficient {asset} to sell. "
+                   f"Required: {needed:,f}, Available: {have:,f}")
+        print(f"      ✓ {asset}: selling {needed:,f} of {have:,f} available")
+    for asset, cost in buy_cost.items():
+        have = balances.get(asset, Decimal(0))
+        flag = "✓" if have >= cost else "⚠"
+        print(f"      {flag} {asset}: buys cost ≈ {cost:,.2f}, available {have:,.2f}"
+              + ("" if have >= cost else "  (WARNING: may be insufficient)"))
+
+    print("\n[4/4] Validating order precision and minimums...")
+    for order in orders:
+        label = order.get("label", order["pair"])
+        info = pair_info[order["pair"]]
+        order_min = Decimal(str(info.get("ordermin", "0")))
+        lot_decimals = int(info.get("lot_decimals", 8))
+        pair_decimals = int(info.get("pair_decimals", 8))
+
+        vol = Decimal(order["volume"])
+        if vol < order_min:
+            _abort(f"{label}: volume {vol} is below minimum {order_min}")
+        if "." in order["volume"]:
+            used = len(order["volume"].split(".")[1])
+            if used > lot_decimals:
+                _abort(f"{label}: volume has {used} decimal places "
+                       f"but pair allows {lot_decimals}")
+        dv = order.get("displayvol")
+        if dv is not None:
+            dvol = Decimal(dv)
+            if dvol < order_min:
+                _abort(f"{label}: displayvol {dvol} is below minimum {order_min}")
+            if dvol > vol:
+                _abort(f"{label}: displayvol {dvol} exceeds volume {vol}")
+        # Percentage strings (trailing-stop offsets like "+18.0%") skip
+        # numeric precision checks — Kraken validates those server-side.
+        for price_field in ("price", "price2"):
+            p = order.get(price_field, "")
+            if p and not p.startswith(("+", "-")):
+                try:
+                    p_str = format(Decimal(p), "f")
+                    if "." in p_str:
+                        used = len(p_str.split(".")[1].rstrip("0") or "")
+                        if used > pair_decimals:
+                            _abort(f"{label}: {price_field}={p} has {used} decimal "
+                                   f"places but pair allows {pair_decimals}")
+                except InvalidOperation:
+                    _abort(f"{label}: {price_field}='{p}' is not a valid number")
+        print(f"      ✓ {label}")
+
+    print("\nPre-flight PASSED.\n")
+
+
+# ---------------------------------------------------------------------------
+# place — dry-run and live
+# ---------------------------------------------------------------------------
+
+def show_orders(doc: dict, heading: str) -> None:
+    print("=" * 60)
+    print(heading)
+    print("=" * 60)
+    for i, order in enumerate(doc["orders"], 1):
+        print(f"\n  [{i}] {order.get('label', '(no label)')}")
+        for k, v in _build_api_params(order).items():
+            print(f"        {k:<14} = {v}")
+    print()
+
+
+def run_validate(api: krakenex.API, doc: dict) -> None:
+    """Server-side dry-run: AddOrder with validate=true places nothing."""
+    print("=" * 60)
+    print("SERVER VALIDATION — validate=true (no orders placed)")
+    print("=" * 60)
+    failures = 0
+    for i, order in enumerate(doc["orders"], 1):
+        label = order.get("label", f"order {i}")
+        params = _build_api_params(order)
+        params["validate"] = "true"
+        resp = api.query_private("AddOrder", params)
+        if resp.get("error"):
+            print(f"  [{i}/{len(doc['orders'])}] FAILED  {label}")
+            print(f"        {resp['error']}")
+            failures += 1
+        else:
+            descr = resp["result"].get("descr", {}).get("order", "")
+            print(f"  [{i}/{len(doc['orders'])}] OK      {label}")
+            if descr:
+                print(f"        Kraken reads this as: {descr}")
+    print()
+    if failures:
+        _abort(f"{failures} order(s) failed server validation — nothing was placed")
+    print("All orders passed server validation.\n")
+
+
+def write_log(entry: dict) -> None:
+    LOG_FILE.parent.mkdir(exist_ok=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def place_live(api: krakenex.API, doc: dict, account: str, source_file: str) -> None:
+    orders = doc["orders"]
+    print("!" * 60)
+    print(f"  WARNING: This will place {len(orders)} REAL order(s) on the")
+    print(f"  '{account}' Kraken account.")
+    print("!" * 60)
+    answer = input(f"\nType CONFIRM to place all {len(orders)} orders, "
+                   f"or anything else to abort: ")
+    if answer.strip() != "CONFIRM":
+        print("Aborted.")
+        sys.exit(0)
+    print()
+
+    print("=" * 60)
+    print("PLACING ORDERS")
+    print("=" * 60)
+    results = []
+    for i, order in enumerate(orders, 1):
+        label = order.get("label", f"order {i}")
+        print(f"\n[{i}/{len(orders)}] {label}")
+        params = _build_api_params(order)
+        resp = api.query_private("AddOrder", params)
+        ts = _utc_now()
+        error = resp.get("error") or None
+        txids = resp.get("result", {}).get("txid", []) if not error else []
+        txid = ", ".join(txids) if txids else None
+        descr = resp.get("result", {}).get("descr", {}).get("order", "") if not error else ""
+        write_log({
+            "ts": ts, "event": "add_order", "account": account,
+            "source_file": source_file, "label": label, "params": params,
+            "txid": txid, "descr": descr,
+            "error": error if not error else [str(e) for e in error],
+        })
+        if error:
+            print(f"  FAILED: {error}")
+            _print_summary(results, orders, failed_at=label)
+            sys.exit(1)
+        print(f"  Order ID  : {txid or '(no txid returned)'}")
+        print(f"  Status    : open")
+        print(f"  Timestamp : {ts}")
+        results.append({"label": label, "txid": txid, "order": order})
+
+    _print_summary(results, orders)
+
+
+def _print_summary(results: list, orders: list, failed_at=None) -> None:
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    totals = {}
+    for r in results:
+        print(f"  OK       {r['label']}")
+        print(f"           ID: {r['txid']}")
+        o = r["order"]
+        key = (o["pair"], o["type"])
+        totals[key] = totals.get(key, Decimal(0)) + Decimal(o["volume"])
+    if failed_at:
+        print(f"\n  STOPPED at: {failed_at}")
+    for (pair, side), vol in totals.items():
+        print(f"\n  Total {side} volume placed on {pair}: {vol:,f}")
+    print("=" * 60)
+
+
+def cmd_place(args) -> None:
+    api = get_api(args.account)
+    doc = load_order_file(args.file, args.account)
+    if doc.get("description"):
+        print(f"Order file : {args.file}")
+        print(f"Description: {doc['description']}\n")
+
+    run_preflight(api, doc)
+
+    if not args.live:
+        show_orders(doc, "DRY-RUN — Orders that WOULD be sent to Kraken")
+        run_validate(api, doc)
+        print("Dry-run complete. Nothing was placed.")
+        print(f"To place for real, run:\n"
+              f"  python3 kraken.py place {args.file} --account {args.account} --live")
+        return
+
+    show_orders(doc, "LIVE MODE — Orders to be placed on Kraken")
+    place_live(api, doc, args.account, args.file)
+
+
+# ---------------------------------------------------------------------------
+# split — generate order files (never touches the private API)
+# ---------------------------------------------------------------------------
+
+def _quantize_down(value: Decimal, decimals: int) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_DOWN)
+
+
+def _quantize_price(value: Decimal, decimals: int) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_EVEN)
+
+
+def allocate_volumes(total: Decimal, weights: list, lot_decimals: int) -> list:
+    """Split total into len(weights) shares proportional to weights.
+    Exact: sum(shares) == total, every share on the lot grid.
+    Remainder goes to the largest fractional parts first (largest-remainder)."""
+    quantum = Decimal(1).scaleb(-lot_decimals)
+    if total % quantum != 0:
+        _abort(f"Total volume {total} is not a multiple of the lot size {quantum}")
+    wsum = sum(weights)
+    raw = [total * w / wsum for w in weights]
+    shares = [r.quantize(quantum, rounding=ROUND_DOWN) for r in raw]
+    remainder = total - sum(shares)
+    order = sorted(range(len(raw)), key=lambda i: raw[i] - shares[i], reverse=True)
+    i = 0
+    while remainder > 0:
+        shares[order[i % len(shares)]] += quantum
+        remainder -= quantum
+        i += 1
+    assert sum(shares) == total, "allocation invariant violated"
+    return shares
+
+
+def _parse_offset_pct(offset: str) -> Decimal:
+    """'-3%' -> Decimal('0.97'); '+2.5%' -> Decimal('1.025')"""
+    s = offset.strip().rstrip("%")
+    try:
+        return Decimal(1) + Decimal(s) / 100
+    except InvalidOperation:
+        _abort(f"Bad --limit-offset '{offset}' (expected e.g. -3%)")
+
+
+def _write_order_doc(args, orders: list, description: str) -> None:
+    doc = {
+        "version": 1,
+        "account": args.account,
+        "description": description,
+        "generated_by": "kraken.py " + " ".join(sys.argv[1:]),
+        "created": _utc_now(),
+        "orders": orders,
+    }
+    out = Path(args.output)
+    out.parent.mkdir(exist_ok=True)
+    if out.exists() and not args.force:
+        _abort(f"{out} already exists — pass --force to overwrite")
+    with open(out, "w") as f:
+        json.dump(doc, f, indent=2)
+        f.write("\n")
+    print(f"\nWrote {out}")
+    print(f"Review it, then dry-run:\n"
+          f"  python3 kraken.py place {out} --account {args.account}")
+
+
+def _print_split_table(rows: list, total: Decimal) -> None:
+    print(f"\n{'#':<3} {'Price':>16} {'Volume':>20} {'% of total':>10}   {'Running sum':>20}")
+    print("-" * 76)
+    running = Decimal(0)
+    for i, (price, vol) in enumerate(rows, 1):
+        running += vol
+        pct = (vol / total * 100).quantize(Decimal("0.01"))
+        print(f"{i:<3} {price:>16} {format(vol, 'f'):>20} {pct:>9}%   {format(running, 'f'):>20}")
+    match = "✓ exact" if running == total else "✗ MISMATCH"
+    print(f"\nTotal: {format(running, 'f')} / {format(total, 'f')}  {match}")
+
+
+def cmd_split_ladder(args) -> None:
+    api = get_public_api()
+    info = fetch_pair_info(api, [args.pair])[args.pair]
+    lot_decimals = int(info["lot_decimals"])
+    pair_decimals = int(info["pair_decimals"])
+    order_min = Decimal(str(info.get("ordermin", "0")))
+
+    if args.prices:
+        prices = [Decimal(p) for p in args.prices.split(",")]
+        levels = len(prices)
+    else:
+        if not (args.price_start and args.price_end and args.levels):
+            _abort("Provide either --prices, or --price-start/--price-end/--levels")
+        levels = args.levels
+        start, end = Decimal(args.price_start), Decimal(args.price_end)
+        if levels < 2:
+            _abort("--levels must be at least 2 (use split iceberg/chunk for one order)")
+        step = (end - start) / (levels - 1)
+        prices = [_quantize_price(start + step * i, pair_decimals) for i in range(levels)]
+
+    for p in prices:
+        p_str = format(p, "f")
+        if "." in p_str and len(p_str.split(".")[1]) > pair_decimals:
+            _abort(f"Price {p} exceeds {pair_decimals} decimal places for {args.pair}")
+
+    if args.weights:
+        weights = [Decimal(w) for w in args.weights.split(",")]
+        if len(weights) != levels:
+            _abort(f"--weights has {len(weights)} entries but there are {levels} levels")
+    else:
+        weights = [Decimal(1)] * levels
+
+    total = Decimal(args.total_volume)
+    shares = allocate_volumes(total, weights, lot_decimals)
+    for i, share in enumerate(shares):
+        if share < order_min:
+            _abort(f"Level {i + 1} volume {share} is below pair minimum {order_min} — "
+                   f"use fewer levels or adjust weights")
+
+    factor = _parse_offset_pct(args.limit_offset) if args.limit_offset else None
+    orders = []
+    for i, (price, vol) in enumerate(zip(prices, shares), 1):
+        pct = (Decimal(weights[i - 1]) / sum(weights) * 100).quantize(Decimal("0.1"))
+        order = {
+            "label": f"L{i} — {args.ordertype} {args.side} {pct}% @ {format(price, 'f')}",
+            "pair": args.pair,
+            "type": args.side,
+            "ordertype": args.ordertype,
+            "price": format(price, "f"),
+            "volume": format(vol, "f"),
+        }
+        if factor is not None:
+            order["price2"] = format(_quantize_price(price * factor, pair_decimals), "f")
+        if args.trigger:
+            order["trigger"] = args.trigger
+        if args.oflags:
+            order["oflags"] = args.oflags
+        order["timeinforce"] = args.tif
+        required, forbidden = ORDERTYPE_PRICES.get(args.ordertype, (set(), set()))
+        if "price2" in required and "price2" not in order:
+            _abort(f"ordertype '{args.ordertype}' needs --limit-offset to derive price2")
+        if "price2" in forbidden:
+            order.pop("price2", None)
+        orders.append(order)
+
+    _print_split_table(list(zip([format(p, "f") for p in prices], shares)), total)
+    desc = (f"{args.pair} {args.side} ladder — {levels} levels, "
+            f"total {format(total, 'f')}")
+    _write_order_doc(args, orders, desc)
+
+
+def cmd_split_chunk(args) -> None:
+    api = get_public_api()
+    info = fetch_pair_info(api, [args.pair])[args.pair]
+    lot_decimals = int(info["lot_decimals"])
+    order_min = Decimal(str(info.get("ordermin", "0")))
+
+    total = Decimal(args.total_volume)
+    shares = allocate_volumes(total, [Decimal(1)] * args.chunks, lot_decimals)
+    for i, share in enumerate(shares):
+        if share < order_min:
+            _abort(f"Chunk {i + 1} volume {share} is below pair minimum {order_min}")
+
+    orders = []
+    for i, vol in enumerate(shares, 1):
+        order = {
+            "label": f"C{i}/{args.chunks} — limit {args.side} @ {args.price}",
+            "pair": args.pair,
+            "type": args.side,
+            "ordertype": "limit",
+            "price": args.price,
+            "volume": format(vol, "f"),
+            "timeinforce": args.tif,
+        }
+        if args.oflags:
+            order["oflags"] = args.oflags
+        orders.append(order)
+
+    _print_split_table([(args.price, v) for v in shares], total)
+    desc = f"{args.pair} {args.side} split into {args.chunks} chunks @ {args.price}"
+    _write_order_doc(args, orders, desc)
+
+
+def cmd_split_iceberg(args) -> None:
+    api = get_public_api()
+    info = fetch_pair_info(api, [args.pair])[args.pair]
+    order_min = Decimal(str(info.get("ordermin", "0")))
+
+    vol, dvol = Decimal(args.total_volume), Decimal(args.display)
+    if dvol < order_min:
+        _abort(f"Display volume {dvol} is below pair minimum {order_min}")
+    if dvol > vol:
+        _abort(f"Display volume {dvol} exceeds total volume {vol}")
+    if dvol < vol / 25:
+        _abort(f"Kraken requires display volume ≥ 1/25 of total "
+               f"({format(_quantize_down(vol / 25, int(info['lot_decimals'])), 'f')})")
+
+    order = {
+        "label": f"Iceberg — limit {args.side} {args.total_volume} @ {args.price} "
+                 f"(display {args.display})",
+        "pair": args.pair,
+        "type": args.side,
+        "ordertype": "limit",
+        "price": args.price,
+        "volume": args.total_volume,
+        "displayvol": args.display,
+        "timeinforce": args.tif,
+    }
+    if args.oflags:
+        order["oflags"] = args.oflags
+
+    _print_split_table([(args.price, vol)], vol)
+    desc = f"{args.pair} {args.side} iceberg @ {args.price}, display {args.display}"
+    _write_order_doc(args, [order], desc)
+
+
+# ---------------------------------------------------------------------------
+# cancel / cancel-all
+# ---------------------------------------------------------------------------
+
+def cmd_cancel(args) -> None:
+    api = get_api(args.account)
+    resp = api.query_private("QueryOrders", {"txid": ",".join(args.txids)})
+    _assert_no_error(resp, "QueryOrders")
+    found = resp["result"]
+    print("Orders to cancel:\n")
+    _print_order_rows(found)
+    missing = [t for t in args.txids if t not in found]
+    if missing:
+        _abort(f"TxID(s) not found on this account: {', '.join(missing)}")
+    answer = input(f"\nCancel {len(args.txids)} order(s)? [y/N] ")
+    if answer.strip().lower() != "y":
+        print("Aborted.")
+        return
+    for txid in args.txids:
+        resp = api.query_private("CancelOrder", {"txid": txid})
+        error = resp.get("error") or None
+        write_log({
+            "ts": _utc_now(), "event": "cancel_order", "account": args.account,
+            "txid": txid,
+            "error": error if not error else [str(e) for e in error],
+        })
+        if error:
+            print(f"  FAILED  {txid}: {error}")
+        else:
+            print(f"  OK      {txid} cancelled")
+
+
+def cmd_cancel_all(args) -> None:
+    api = get_api(args.account)
+    resp = api.query_private("OpenOrders")
+    _assert_no_error(resp, "OpenOrders")
+    orders = resp["result"].get("open", {})
+    if not orders:
+        print("No open orders to cancel.")
+        return
+    print(f"This will cancel ALL {len(orders)} open order(s) on "
+          f"'{args.account}':\n")
+    _print_order_rows(orders)
+    answer = input("\nType CONFIRM to cancel all of these orders: ")
+    if answer.strip() != "CONFIRM":
+        print("Aborted.")
+        return
+    resp = api.query_private("CancelAll")
+    error = resp.get("error") or None
+    write_log({
+        "ts": _utc_now(), "event": "cancel_all", "account": args.account,
+        "count": resp.get("result", {}).get("count"),
+        "error": error if not error else [str(e) for e in error],
+    })
+    _assert_no_error(resp, "CancelAll")
+    print(f"Cancelled {resp['result'].get('count', '?')} order(s).")
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def _add_account_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--account", required=True,
+                   help="Account name from accounts.json (e.g. main). Required.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="kraken.py",
+        description="Kraken trading CLI — dry-run by default, --live requires CONFIRM.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("balance", help="Show non-zero balances")
+    _add_account_arg(p)
+    p.set_defaults(func=cmd_balance)
+
+    p = sub.add_parser("ticker", help="Show current prices (public)")
+    p.add_argument("pairs", nargs="+", metavar="PAIR")
+    p.set_defaults(func=cmd_ticker)
+
+    p = sub.add_parser("pair-info", help="Show pair minimums and precision (public)")
+    p.add_argument("pair", metavar="PAIR")
+    p.set_defaults(func=cmd_pair_info)
+
+    p = sub.add_parser("open-orders", help="List open orders")
+    _add_account_arg(p)
+    p.set_defaults(func=cmd_open_orders)
+
+    p = sub.add_parser("closed-orders", help="List recent closed orders")
+    _add_account_arg(p)
+    p.add_argument("--count", type=int, default=20)
+    p.set_defaults(func=cmd_closed_orders)
+
+    p = sub.add_parser("trades", help="List recent fills")
+    _add_account_arg(p)
+    p.add_argument("--count", type=int, default=20)
+    p.set_defaults(func=cmd_trades)
+
+    p = sub.add_parser("place", help="Place orders from a JSON order file "
+                                     "(dry-run unless --live)")
+    p.add_argument("file", help="Path to order file (see orders/)")
+    _add_account_arg(p)
+    p.add_argument("--live", action="store_true",
+                   help="Place real orders (requires typing CONFIRM)")
+    p.set_defaults(func=cmd_place)
+
+    split = sub.add_parser("split", help="Generate an order file (places nothing)")
+    split_sub = split.add_subparsers(dest="split_kind", required=True)
+
+    def _common_split_args(sp, with_price=False):
+        sp.add_argument("--pair", required=True)
+        sp.add_argument("--side", required=True, choices=["buy", "sell"])
+        sp.add_argument("--total-volume", required=True)
+        if with_price:
+            sp.add_argument("--price", required=True)
+        sp.add_argument("--oflags", default=None,
+                        help="e.g. 'post' for post-only maker orders")
+        sp.add_argument("--tif", default="GTC", help="timeinforce (default GTC)")
+        _add_account_arg(sp)
+        sp.add_argument("-o", "--output", required=True,
+                        help="Output order file, e.g. orders/2026-09-07_main_SOLUSD_ladder.json")
+        sp.add_argument("--force", action="store_true",
+                        help="Overwrite the output file if it exists")
+
+    sp = split_sub.add_parser("ladder", help="Split volume across N price levels")
+    _common_split_args(sp)
+    sp.add_argument("--ordertype", default="limit",
+                    choices=sorted(set(ORDERTYPE_PRICES) - {"market"}))
+    sp.add_argument("--levels", type=int)
+    sp.add_argument("--price-start")
+    sp.add_argument("--price-end")
+    sp.add_argument("--prices", help="Explicit comma-separated price list "
+                                     "(overrides start/end/levels)")
+    sp.add_argument("--weights", help="Comma-separated weights, default equal")
+    sp.add_argument("--limit-offset",
+                    help="Derive price2 from price; use the = form for negative "
+                         "values, e.g. --limit-offset=-3%% (for *-limit trigger types)")
+    sp.add_argument("--trigger", default=None, choices=["last", "index"])
+    sp.set_defaults(func=cmd_split_ladder)
+
+    sp = split_sub.add_parser("chunk", help="Split volume into N equal limit orders")
+    _common_split_args(sp, with_price=True)
+    sp.add_argument("--chunks", type=int, required=True)
+    sp.set_defaults(func=cmd_split_chunk)
+
+    sp = split_sub.add_parser("iceberg", help="Single limit order showing only "
+                                              "part of its volume")
+    _common_split_args(sp, with_price=True)
+    sp.add_argument("--display", required=True,
+                    help="Visible volume (>= 1/25 of total)")
+    sp.set_defaults(func=cmd_split_iceberg)
+
+    p = sub.add_parser("cancel", help="Cancel order(s) by TxID")
+    p.add_argument("txids", nargs="+", metavar="TXID")
+    _add_account_arg(p)
+    p.set_defaults(func=cmd_cancel)
+
+    p = sub.add_parser("cancel-all", help="Cancel ALL open orders on an account")
+    _add_account_arg(p)
+    p.set_defaults(func=cmd_cancel_all)
+
+    args = parser.parse_args()
+    try:
+        args.func(args)
+    except (ConnectionError, TimeoutError, OSError) as e:
+        _abort(f"Network error talking to Kraken: {e}")
+
+
+if __name__ == "__main__":
+    main()

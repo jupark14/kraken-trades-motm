@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "account": "main",
+  "description": "LUNAUSD sell ladder \u2014 3 levels, total 1000000",
+  "generated_by": "kraken.py split ladder --pair LUNAUSD --side sell --ordertype take-profit-limit --total-volume 1000000 --prices 0.0001,0.00015,0.0002 --limit-offset=-3% --trigger last --account main -o orders/examples/2026-09-07_main_LUNAUSD_take-profit-ladder.json",
+  "created": "2026-09-07T15:14:29Z",
+  "orders": [
+    {
+      "label": "L1 \u2014 take-profit-limit sell 33.3% @ 0.0001",
+      "pair": "LUNAUSD",
+      "type": "sell",
+      "ordertype": "take-profit-limit",
+      "price": "0.0001",
+      "volume": "333333.33333334",
+      "price2": "0.00009700",
+      "trigger": "last",
+      "timeinforce": "GTC"
+    },
+    {
+      "label": "L2 \u2014 take-profit-limit sell 33.3% @ 0.00015",
+      "pair": "LUNAUSD",
+      "type": "sell",
+      "ordertype": "take-profit-limit",
+      "price": "0.00015",
+      "volume": "333333.33333333",
+      "price2": "0.00014550",
+      "trigger": "last",
+      "timeinforce": "GTC"
+    },
+    {
+      "label": "L3 \u2014 take-profit-limit sell 33.3% @ 0.0002",
+      "pair": "LUNAUSD",
+      "type": "sell",
+      "ordertype": "take-profit-limit",
+      "price": "0.0002",
+      "volume": "333333.33333333",
+      "price2": "0.00019400",
+      "trigger": "last",
+      "timeinforce": "GTC"
+    }
+  ]
+}

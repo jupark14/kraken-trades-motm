@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "account": "main",
+  "description": "XBTUSD buy iceberg @ 75000, display 0.05",
+  "generated_by": "kraken.py split iceberg --pair XBTUSD --side buy --price 75000 --total-volume 0.5 --display 0.05 --oflags post --account main -o orders/examples/2026-09-07_main_XBTUSD_iceberg.json",
+  "created": "2026-09-07T15:14:29Z",
+  "orders": [
+    {
+      "label": "Iceberg \u2014 limit buy 0.5 @ 75000 (display 0.05)",
+      "pair": "XBTUSD",
+      "type": "buy",
+      "ordertype": "limit",
+      "price": "75000",
+      "volume": "0.5",
+      "displayvol": "0.05",
+      "timeinforce": "GTC",
+      "oflags": "post"
+    }
+  ]
+}

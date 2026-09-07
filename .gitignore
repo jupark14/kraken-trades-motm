@@ -1,0 +1,19 @@
+# Secrets. Never commit.
+.env
+
+# Your live trade history stays on your machine.
+logs/
+
+# Your own order files stay local too. Only orders/examples/ is shared.
+orders/*.json
+
+# Claude Code per-machine settings
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store

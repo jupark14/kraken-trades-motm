@@ -1,0 +1,14 @@
+{
+  "accounts": {
+    "main": {
+      "key_env": "KRAKEN_API_KEY",
+      "secret_env": "KRAKEN_API_SECRET",
+      "description": "Primary Kraken account"
+    },
+    "second": {
+      "key_env": "KRAKEN_API_KEY_2",
+      "secret_env": "KRAKEN_API_SECRET_2",
+      "description": "Second Kraken account (optional)"
+    }
+  }
+}
