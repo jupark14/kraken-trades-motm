@@ -10,9 +10,9 @@ Everything is **dry-run by default**. `--live` shows the full order list and
 requires typing `CONFIRM`. Your API keys need order permissions only. No
 withdrawal permissions, ever.
 
-New here? Start with [SETUP.md](SETUP.md). It walks through installing Python
-and Claude Code, creating a Kraken API key, and putting that key in your `.env`
-file, step by step.
+New here? Start with [SETUP.md](SETUP.md). Open this folder in the Claude
+desktop app's Code tab, paste one prompt, and Claude does most of the setup.
+The only part you do by hand is creating the Kraken API key.
 
 ## How it fits together
 

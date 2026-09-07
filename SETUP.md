@@ -1,109 +1,56 @@
 # Setting up Kraken Trades with Claude Code
 
-This guide is for Money on the Move members who have never opened a terminal
-before. Go slowly, do the steps in order, and you will end up with a folder on
-your computer where Claude Code can prepare Kraken orders for you and you press
-the button yourself. Plan on about thirty minutes.
+This guide is for Money on the Move members who already have the Claude
+desktop app with the Code tab open. You will end up with a folder on your
+computer where Claude prepares Kraken orders for you and you press the button
+yourself. Plan on about fifteen minutes.
 
 ## What you need before you start
 
 - A Kraken account that is verified and funded. The Crypto Setup course on
   Patreon covers opening one.
-- A Claude plan that includes Claude Code: Pro, Max, Team, or Enterprise. The
-  free Claude plan does not include it.
-- A Mac or a Windows PC. Every command below is written for Mac first, with the
-  Windows difference noted where there is one.
+- The Claude desktop app, signed in to a plan that includes Claude Code (Pro,
+  Max, Team, or Enterprise), with the Code tab open.
+- A Mac or a Windows PC.
 
-## Step 1. Open a terminal
+## Step 1. Put this folder on your computer
 
-Mac: press Command and Space, type `Terminal`, press Return.
+On the GitHub page for this project, click the green **Code** button, then
+**Download ZIP**. Unzip it and move the folder somewhere sensible, such as your
+Documents folder. Rename it to `kraken-trades-motm` if it has a longer name.
 
-Windows: press the Windows key, type `PowerShell`, press Enter.
+## Step 2. Open the folder in Claude Code
 
-Everything that looks like this is something you type into that window:
+In the Claude desktop app, go to the Code tab and choose the folder you just
+unzipped as the working folder. Claude reads the `CLAUDE.md` file inside it
+automatically, so it already knows the rules: it prepares and checks orders,
+and you place them.
 
-```bash
-echo hello
-```
+## Step 3. Paste this and let Claude do the setup
 
-## Step 2. Check that Python is installed
+Copy the whole paragraph below, paste it into the Claude Code chat, and press
+Return:
 
-```bash
-python3 --version
-```
+> I just downloaded this folder and I have never used it before. Please set it
+> up for me, one step at a time, waiting for me after each step. Check that
+> Python 3.9 or newer is installed and tell me how to install it if it is not.
+> Install the Python libraries from requirements.txt. Create my .env file from
+> .env.example and lock it down. Then tell me exactly how to create a Kraken
+> API key with order permissions only and no withdrawal, deposit, or transfer
+> permissions, and how to open .env in a text editor so I can paste the keys in
+> myself. Never ask me to paste keys into this chat. When I say the keys are
+> saved, test with a public ticker command, then check my balance on the main
+> account, and tell me what to try next.
 
-You want to see `Python 3.9` or higher. If the Mac says the command is not
-found, install the Apple developer tools with `xcode-select --install`, or
-download Python from https://www.python.org/downloads/ and run the installer.
+Claude will run each command, show you what it did, and stop where you have to
+do something yourself. It asks your permission before it runs each command.
+Read what it wants to run, then say yes. That prompt is a feature, not a
+nuisance.
 
-Windows: download Python from https://www.python.org/downloads/ and run the
-installer. On the first screen tick the box that says **Add Python to PATH**
-before clicking Install. On Windows the commands are `python` and `pip`
-instead of `python3` and `pip3`. Everywhere this guide says `python3`, type
-`python`.
+The one step Claude cannot do for you is creating the key on Kraken's website.
+That is Step 4.
 
-## Step 3. Install Claude Code
-
-Mac, paste this into the terminal:
-
-```bash
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-Windows, paste this into PowerShell:
-
-```powershell
-irm https://claude.ai/install.ps1 | iex
-```
-
-Close the terminal window and open a new one so it picks up the new command.
-Then type `claude` and press Return. The first run opens your browser to log in
-with your Claude account. Once it says you are logged in, type `/exit` to leave
-for now.
-
-The official install page is https://code.claude.com/docs/en/setup.md if you
-get stuck.
-
-## Step 4. Put this folder on your computer
-
-The easiest way is to download it. On the GitHub page for this project, click
-the green **Code** button, then **Download ZIP**. Unzip it and move the folder
-somewhere sensible, such as your Documents folder. Rename it to
-`kraken-trades-motm` if it has a longer name.
-
-If you already use git, this works too:
-
-```bash
-git clone https://github.com/moneyotm/kraken-trades-motm.git
-```
-
-Now move the terminal into that folder. Type `cd ` with a space after it, then
-drag the folder from Finder (or File Explorer) into the terminal window, and
-press Return. You should see something like this:
-
-```bash
-cd ~/Documents/kraken-trades-motm
-```
-
-Check you are in the right place:
-
-```bash
-ls
-```
-
-You should see `kraken.py`, `README.md`, `SETUP.md`, and a few other files.
-
-## Step 5. Install the two Python libraries the tool uses
-
-```bash
-pip3 install -r requirements.txt
-```
-
-It installs `krakenex` (talks to Kraken) and `python-dotenv` (reads your `.env`
-file). If the Mac prints a long warning mentioning `NotOpenSSLWarning` or
-`LibreSSL`, ignore it. It is harmless.
-
-## Step 6. Create your Kraken API key
+## Step 4. Create your Kraken API key
 
 An API key is a password that lets a program act on your Kraken account. We
 make one with the smallest set of permissions that still lets it place orders.
@@ -129,39 +76,7 @@ Copy both somewhere safe right now, such as a password manager. Kraken will
 never show you the Private Key again. If you lose it, delete the key and make a
 new one.
 
-## Step 7. Put the keys in your .env file
-
-The tool reads your keys from a file called `.env` in this folder. That file
-does not exist yet. Create it by copying the example:
-
-Mac:
-
-```bash
-cp .env.example .env
-```
-
-Windows:
-
-```powershell
-copy .env.example .env
-```
-
-Now open it in a text editor. Files that start with a dot are hidden in
-Finder, so open it from the terminal:
-
-Mac:
-
-```bash
-open -e .env
-```
-
-Windows:
-
-```powershell
-notepad .env
-```
-
-You will see lines like these:
+Claude will have opened your `.env` file in a text editor. It looks like this:
 
 ```
 KRAKEN_API_KEY=paste_your_api_key_here
@@ -171,13 +86,8 @@ KRAKEN_API_SECRET=paste_your_private_key_here
 Replace `paste_your_api_key_here` with your API Key and
 `paste_your_private_key_here` with your Private Key. No spaces around the
 equals sign, no quotation marks. Leave the `_2` lines alone unless you are
-setting up a second account (Step 10). Save and close the editor.
-
-On a Mac, lock the file so only your user can read it:
-
-```bash
-chmod 600 .env
-```
+setting up a second account (see below). Save and close the editor, then go
+back to Claude and say the keys are saved.
 
 Three rules about this file:
 
@@ -188,42 +98,10 @@ Three rules about this file:
 - If a key ever leaks, go back to Kraken, delete that key, and make a new one.
   Then update `.env`.
 
-## Step 8. Test it
+## Step 5. Start using it
 
-First a public command that needs no key at all:
-
-```bash
-python3 kraken.py ticker XBTUSD SOLUSD
-```
-
-You should see current prices. Now a private command that uses your key:
-
-```bash
-python3 kraken.py balance --account main
-```
-
-You should see a line that says `Account: main` followed by a table of your
-balances. If you see an error instead, look at the troubleshooting section at
-the bottom of this page.
-
-## Step 9. Open Claude Code in this folder
-
-Make sure the terminal is still inside the folder (run `ls` and check you see
-`kraken.py`), then:
-
-```bash
-claude
-```
-
-Claude Code reads the `CLAUDE.md` file in this folder automatically, so it
-already knows the rules: it prepares and checks orders, and you place them.
-
-Claude will ask your permission before it runs each command. Read what it wants
-to run, then say yes. That prompt is a feature, not a nuisance.
-
-Things to try, in plain English:
-
-> Show me my balance on main.
+Once Claude has shown you your balance, you are set up. Things to try, in
+plain English:
 
 > What is the minimum order size for LUNAUSD?
 
@@ -232,18 +110,17 @@ Things to try, in plain English:
 
 Claude will write the order file into `orders/`, run the dry-run, show you the
 preflight and Kraken validation output, and then give you a command that ends
-in `--live`. That command is yours. Type `/exit` to leave Claude, or open a
-second terminal window in the same folder, paste the command, read the list of
-orders one more time, and type `CONFIRM`.
+in `--live`. That command is yours. Open a terminal in the same folder, paste
+the command, read the list of orders one more time, and type `CONFIRM`.
 
 After it runs, go back to Claude and say:
 
 > I placed them. Check open orders on main.
 
-## Step 10 (optional). A second Kraken account
+## Optional. A second Kraken account
 
 The tool supports two accounts out of the box. Make a second API key on the
-second account exactly as in Step 6, then fill in the two `_2` lines in `.env`:
+second account exactly as in Step 4, then fill in the two `_2` lines in `.env`:
 
 ```
 KRAKEN_API_KEY_2=...
@@ -251,8 +128,9 @@ KRAKEN_API_SECRET_2=...
 ```
 
 Use it with `--account second`. If you would rather call it something else,
-open `accounts.json` and change the word `second` to whatever you like, such as
-`roth` or `spouse`. Keep the name short, lowercase, and with no spaces.
+ask Claude to rename it in `accounts.json`, or open that file and change the
+word `second` to whatever you like, such as `roth` or `spouse`. Keep the name
+short, lowercase, and with no spaces.
 
 ## The rules, one more time
 
@@ -268,13 +146,15 @@ open `accounts.json` and change the word `second` to whatever you like, such as
 
 ## Troubleshooting
 
+Paste any error into Claude first. It can usually fix it. The common ones:
+
 | What you see | What it means | What to do |
 |--------------|---------------|------------|
-| `command not found: python3` | Python is not installed, or on Windows it is called `python` | Do Step 2 |
-| `No module named krakenex` | The libraries are not installed | Do Step 5 |
-| `Account 'main' needs KRAKEN_API_KEY and KRAKEN_API_SECRET set in .env` | No `.env` file, or the placeholders are still in it, or you are in the wrong folder | Do Step 7, then `ls` to check the folder |
+| `command not found: python3` | Python is not installed, or on Windows it is called `python` | Install Python from https://www.python.org/downloads/ (on Windows tick **Add Python to PATH**) |
+| `No module named krakenex` | The libraries are not installed | Ask Claude to run `pip3 install -r requirements.txt` |
+| `Account 'main' needs KRAKEN_API_KEY and KRAKEN_API_SECRET set in .env` | No `.env` file, or the placeholders are still in it, or the wrong folder is open | Do Step 4, and check the folder in the Code tab |
 | `EAPI:Invalid key` | The key or secret was pasted wrong, or the two are swapped | Reopen `.env` and paste again. API Key on the KEY line, Private Key on the SECRET line |
-| `EGeneral:Permission denied` | The key is missing a permission | Edit the key on Kraken and turn on the permissions listed in Step 6 |
+| `EGeneral:Permission denied` | The key is missing a permission | Edit the key on Kraken and turn on the permissions listed in Step 4 |
 | `EAPI:Invalid nonce` | Two programs used the key at the same instant | Wait a few seconds and run it again |
 | `EOrder:Insufficient funds` | Not enough balance for the order | Check `balance` and shrink the order |
 | `Account mismatch` | The order file says one account and `--account` says another | Regenerate the file for the right account |
