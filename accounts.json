@@ -9,6 +9,25 @@
       "key_env": "KRAKEN_API_KEY_2",
       "secret_env": "KRAKEN_API_SECRET_2",
       "description": "Second Kraken account (optional)"
+    },
+    "bybit": {
+      "exchange": "bybit",
+      "key_env": "BYBIT_API_KEY",
+      "secret_env": "BYBIT_API_SECRET",
+      "description": "BYBIT spot account (optional)"
+    },
+    "mexc": {
+      "exchange": "mexc",
+      "key_env": "MEXC_API_KEY",
+      "secret_env": "MEXC_API_SECRET",
+      "description": "MEXC spot account (optional)"
+    },
+    "okx": {
+      "exchange": "okx",
+      "key_env": "OKX_API_KEY",
+      "secret_env": "OKX_API_SECRET",
+      "description": "OKX spot account (optional)",
+      "passphrase_env": "OKX_API_PASSPHRASE"
     }
   }
 }

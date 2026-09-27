@@ -132,6 +132,77 @@ ask Claude to rename it in `accounts.json`, or open that file and change the
 word `second` to whatever you like, such as `roth` or `spouse`. Keep the name
 short, lowercase, and with no spaces.
 
+## Bybit, MEXC, and OKX accounts
+
+The shipped `accounts.json` also defines optional `bybit`, `mexc`, and `okx`
+accounts. Existing `main` and `second` accounts still use Kraken. Create API
+keys on the exchange you use, then add their values to `.env` yourself using
+these names (already listed in `.env.example`):
+
+```dotenv
+BYBIT_API_KEY=
+BYBIT_API_SECRET=
+MEXC_API_KEY=
+MEXC_API_SECRET=
+OKX_API_KEY=
+OKX_API_SECRET=
+OKX_API_PASSPHRASE=
+```
+
+OKX requires the API passphrase you chose when creating the key, as well as its
+key and secret. It is not your account login password. Do not share any of
+these values with an assistant. More accounts can be added to `accounts.json`
+with distinct credential variable names.
+
+Use the smallest permission set for reading balances/orders/fills and placing
+or cancelling **spot** orders:
+
+| Exchange | Required access | Leave disabled |
+| --- | --- | --- |
+| Bybit | Read/write API key with Spot trading (`SpotTrade`) and account read access | Withdrawals, transfers, derivatives and other optional products |
+| MEXC | Spot account read, spot order/trade read, spot order/trade write (`SPOT_ACCOUNT_READ`, `SPOT_DEAL_READ`, `SPOT_DEAL_WRITE`) | Withdrawals, transfers and unrelated products |
+| OKX | Read + Trade | Withdraw permission |
+
+Permission bundles are not identical across exchanges. **OKX Trade also permits
+funding transfers**, so an OKX trading key cannot have the same transfer-free
+scope as a Kraken key. This CLI has no transfer or withdrawal commands and
+submits OKX spot orders in cash mode. Restrict keys to your IP where supported.
+Bybit uses a Unified Trading Account and system-generated HMAC API keys;
+orders disable spot borrowing. This tool does not trade derivatives. These
+adapters use global production hosts, not regional or demo endpoints.
+
+Permission references: [Bybit API permissions](https://bybit-exchange.github.io/docs/v5/user/apikey-info),
+[MEXC account access](https://www.mexc.com/api-docs/spot-v3/spot-account-trade/account-information),
+[MEXC order access](https://www.mexc.com/api-docs/spot-v3/spot-account-trade/new-order),
+and [OKX API permissions](https://www.okx.com/docs-v5/en/#overview-api-key-creation).
+
+Public checks require no credentials:
+
+```bash
+python3 kraken.py ticker BTCUSDT --exchange bybit
+python3 kraken.py ticker BTCUSDT --exchange mexc
+python3 kraken.py ticker BTC-USDT --exchange okx
+```
+
+After saving your credentials, check the desired account with
+`python3 kraken.py balance --account bybit` (or `mexc` / `okx`). Use
+`BTCUSDT` on Bybit/MEXC and `BTC-USDT` on OKX. MEXC history and cancellation
+commands require `--pair`, for example:
+
+```bash
+python3 kraken.py closed-orders --account mexc --pair BTCUSDT
+```
+
+The new exchanges support spot market/limit orders and limit ladders/chunks.
+Kraken-specific triggers, trailing stops and icebergs are rejected on them.
+MEXC market buys are also rejected: its API requires a quote-currency budget,
+which differs from this tool's base-volume convention. Use a limit buy.
+Cancel-all covers the displayed regular spot orders, not conditional/algo
+orders or derivatives.
+MEXC dry-runs use its test-order endpoint; Bybit and OKX run local checks only,
+so their dry-run output explicitly says server acceptance is unverified.
+Live placement and cancellations retain their interactive confirmations.
+
 ## The rules, one more time
 
 - Claude never runs `--live`. You do, and you type `CONFIRM` yourself.

@@ -1,28 +1,29 @@
-# Kraken Trades
+# Exchange Trades
 
 A Money on the Move community tool.
 
-A small command-line toolkit for placing orders on Kraken from a plain text
+A small command-line toolkit for placing spot orders on Kraken, Bybit, MEXC, and OKX from a plain text
 order file, with Claude Code doing the preparation and you doing the pressing
-of the button. It handles one or two Kraken accounts.
+of the button. Accounts are explicitly named in `accounts.json`; existing Kraken accounts keep working.
 
 Everything is **dry-run by default**. `--live` shows the full order list and
-requires typing `CONFIRM`. Your API keys need order permissions only. No
-withdrawal permissions, ever.
+requires typing `CONFIRM`. Use read and spot order permissions with withdrawals disabled. Exchange permission
+bundles differ; see [SETUP.md](SETUP.md#bybit-mexc-and-okx-accounts).
 
 New here? Start with [SETUP.md](SETUP.md). Open this folder in the Claude
 desktop app's Code tab, paste one prompt, and Claude does most of the setup.
-The only part you do by hand is creating the Kraken API key.
+You create your exchange API keys yourself.
 
 ## How it fits together
 
 | Piece | What it does |
 |-------|--------------|
-| `kraken.py` | The whole tool. One file. |
+| `kraken.py` | Shared CLI, order generation, preflight, and confirmation. |
+| `exchanges.py` | Bybit, MEXC, and OKX spot REST adapters. |
 | `accounts.json` | Names your accounts (`main`, and optionally `second`) and says which `.env` variables hold their keys. |
 | `.env` | Your API keys. Created by you from `.env.example`. Never committed, never shared. |
 | `orders/` | Order files you generate. Each one is a JSON list of orders for one account. |
-| `orders/examples/` | Three sample order files so you can see the format. |
+| `orders/examples/` | Sample order files so you can see the format. |
 | `logs/trade_log.jsonl` | Append-only history of every live order and cancel this tool has made. Created automatically. |
 | `CLAUDE.md` | The rules Claude Code follows in this folder. Read it once. |
 
@@ -52,6 +53,50 @@ python3 kraken.py trades --account main
 
 `ticker` and `pair-info` are public and work without any key. Kraken names
 LUNC as `LUNAUSD`, Bitcoin as `XBTUSD`.
+
+## Bybit, MEXC, and OKX
+
+Set the optional credentials described in [SETUP.md](SETUP.md#bybit-mexc-and-okx-accounts).
+Private commands select the exchange from `accounts.json`; public commands use
+`--exchange` (defaults to Kraken). `split` uses the named account's exchange and
+needs no credentials. Bybit uses a Unified Trading Account (UTA) and a
+system-generated HMAC key. The new adapters use global production API hosts;
+regional-only accounts and demo environments are not configured.
+
+```bash
+python3 kraken.py ticker BTCUSDT --exchange bybit
+python3 kraken.py pair-info BTCUSDT --exchange mexc
+python3 kraken.py ticker BTC-USDT --exchange okx
+python3 kraken.py balance --account bybit
+python3 kraken.py open-orders --account okx
+python3 kraken.py trades --account mexc --pair BTCUSDT
+python3 kraken.py split ladder --pair BTCUSDT --side buy --total-volume 0.01 \
+    --levels 5 --price-start 60000 --price-end 50000 --account bybit \
+    -o orders/bybit_BTCUSDT_ladder.json
+python3 kraken.py place orders/bybit_BTCUSDT_ladder.json --account bybit
+```
+
+The added exchanges support **spot limit and market orders**, plus limit ladders
+and chunks. Advanced Kraken trigger, trailing-stop, and iceberg orders remain
+Kraken-only; requesting them on another exchange aborts. Unsupported flags or
+order policies also abort instead of changing the order's meaning. All order
+volumes are base-asset quantities. MEXC market buys are rejected because its
+API requires a quote-currency budget; use a limit buy instead.
+
+MEXC history and cancellation commands need `--pair BTCUSDT`. Use `--pair` on
+Bybit/OKX to narrow queries or cancellation scope. Cancel-all shows its scope
+and cancels the displayed snapshot of regular spot orders after confirmation.
+Conditional/algo orders and derivatives are outside that scope. History is the recent
+window supplied by each exchange, not a complete account export.
+
+New order files must include `"exchange": "bybit"`, `"mexc"`, or `"okx"` alongside
+`"account"`. Generators add this automatically. Files without an exchange remain
+Kraken-only for compatibility and cannot silently switch venues.
+
+Dry-runs never submit a live order: Kraken uses `validate=true`, MEXC uses
+`/api/v3/order/test`, and Bybit/OKX use local capability, precision, minimum,
+and balance checks. A local pass does not establish server acceptance or reserve
+funds. Every live placement still requires `--live` and typing `CONFIRM`.
 
 ## Placing orders
 
@@ -108,13 +153,15 @@ python3 kraken.py cancel-all --account main                   # asks for CONFIRM
 - `--account` is required on every private command. There is no default account,
   so a command can never quietly hit the wrong one.
 - Order files embed their target account. `place` refuses if it does not match
-  `--account`.
+  `--account`. New exchange files also bind their `exchange` to the configured account.
 - Dry-run means local checks (balance, minimums, decimal precision) **plus**
-  Kraken's server-side `validate=true` for every single order.
+  Kraken's server-side `validate=true` for every single order. MEXC uses its
+  test-order endpoint. Bybit and OKX perform local checks only and explicitly
+  report that exchange acceptance is unverified.
 - `--live` prints every order again and waits for you to type `CONFIRM`.
 - Every live order and cancel is appended to `logs/trade_log.jsonl`.
 - Unknown keys in an order file abort the run. A typo like `pricee` is never
-  silently dropped on the way to Kraken.
+  silently dropped on the way to the exchange.
 - Your `.env`, your `logs/`, and your own `orders/*.json` are all in
   `.gitignore`, so they stay on your machine even if you push this folder
   somewhere.
@@ -139,6 +186,17 @@ this folder and talk to it in plain English:
 
 Claude will generate the file, dry-run it, show you the output, and hand you
 the `--live` command to run.
+
+## Development checks
+
+```bash
+python3 -m unittest discover -s tests
+python3 -m py_compile kraken.py exchanges.py
+```
+
+Tests mock HTTP and credentials; they never read `.env` or place live orders.
+Authenticated trading requires validation with your own configured account;
+public market-data checks do not validate API-key permissions.
 
 ## License
 

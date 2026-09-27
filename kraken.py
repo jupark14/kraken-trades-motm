@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kraken order-management CLI for one or two Kraken accounts.
+Spot order-management CLI for Kraken, Bybit, MEXC, and OKX.
 
 Dry-run is always the default. --live requires typing CONFIRM.
 See CLAUDE.md for the standard workflow and safety rules, and SETUP.md
@@ -17,6 +17,10 @@ from pathlib import Path
 
 import krakenex
 from dotenv import load_dotenv
+
+from exchanges import SpotAPI
+
+EXCHANGES = ("kraken", "bybit", "mexc", "okx")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ACCOUNTS_FILE = SCRIPT_DIR / "accounts.json"
@@ -54,7 +58,7 @@ def _abort(msg: str) -> None:
 
 def _assert_no_error(resp: dict, endpoint: str) -> None:
     if resp.get("error"):
-        _abort(f"Kraken {endpoint} returned error: {resp['error']}")
+        _abort(f"Exchange {endpoint} returned error: {resp['error']}")
 
 
 # ---------------------------------------------------------------------------
@@ -68,30 +72,50 @@ def load_accounts() -> dict:
         return json.load(f)["accounts"]
 
 
-def get_api(account_name: str) -> krakenex.API:
-    """Build an authenticated API client for a named account. Prints a banner
-    so it is always visible which account a private call is about to touch."""
+def account_config(account_name: str) -> dict:
     accounts = load_accounts()
     if account_name not in accounts:
-        _abort(
-            f"Unknown account '{account_name}'. "
-            f"Valid accounts: {', '.join(sorted(accounts))}"
-        )
+        _abort(f"Unknown account '{account_name}'. Valid accounts: {', '.join(sorted(accounts))}")
     acct = accounts[account_name]
+    if acct.get("exchange", "kraken") not in EXCHANGES:
+        _abort(f"Unsupported exchange for account '{account_name}'")
+    return acct
+
+
+def get_api(account_name: str, pair=None):
+    """Select credentials only through the explicitly named account."""
+    acct = account_config(account_name)
+    exchange = acct.get("exchange", "kraken")
+    if exchange == "kraken" and pair:
+        _abort("--pair scoping is supported only for Bybit, MEXC, and OKX")
     load_dotenv(SCRIPT_DIR / ".env")
-    key = os.environ.get(acct["key_env"])
-    secret = os.environ.get(acct["secret_env"])
-    if not key or not secret:
-        _abort(
-            f"Account '{account_name}' needs {acct['key_env']} and "
-            f"{acct['secret_env']} set in .env"
-        )
-    print(f"Account: {account_name} — {acct.get('description', '')}\n")
-    return krakenex.API(key=key, secret=secret)
+    names = [acct["key_env"], acct["secret_env"]]
+    if exchange == "okx":
+        if not acct.get("passphrase_env"):
+            _abort(f"Account '{account_name}' needs passphrase_env in accounts.json")
+        names.append(acct["passphrase_env"])
+    values = [os.environ.get(name, "") for name in names]
+    if any(not value or value.startswith("paste_") for value in values):
+        _abort(f"Account '{account_name}' needs {', '.join(names)} set in .env")
+    print(f"Account: {account_name} — {exchange.upper()} — {acct.get('description', '')}\n")
+    if exchange == "kraken":
+        api = krakenex.API(key=values[0], secret=values[1])
+        api.exchange = "kraken"
+        return api
+    return SpotAPI(exchange, key=values[0], secret=values[1],
+                   passphrase=values[2] if exchange == "okx" else "", pair=pair)
 
 
-def get_public_api() -> krakenex.API:
-    return krakenex.API()
+def get_public_api(exchange="kraken"):
+    return krakenex.API() if exchange == "kraken" else SpotAPI(exchange)
+
+
+def split_api(args):
+    return get_public_api(account_config(args.account).get("exchange", "kraken"))
+
+
+def exchange_name(api):
+    return getattr(api, "exchange", "kraken").upper()
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +156,7 @@ def fetch_last_price(api: krakenex.API, pair: str) -> Decimal:
 # ---------------------------------------------------------------------------
 
 def cmd_balance(args) -> None:
-    api = get_api(args.account)
+    api = get_api(args.account, getattr(args, "pair", None))
     resp = api.query_private("Balance")
     _assert_no_error(resp, "Balance")
     balances = {k: Decimal(v) for k, v in resp["result"].items()}
@@ -147,7 +171,7 @@ def cmd_balance(args) -> None:
 
 
 def cmd_ticker(args) -> None:
-    api = get_public_api()
+    api = get_public_api(args.exchange)
     for pair in args.pairs:
         resp = api.query_public("Ticker", {"pair": pair})
         if resp.get("error"):
@@ -161,7 +185,7 @@ def cmd_ticker(args) -> None:
 
 
 def cmd_pair_info(args) -> None:
-    api = get_public_api()
+    api = get_public_api(args.exchange)
     info = fetch_pair_info(api, [args.pair])[args.pair]
     print(f"Pair            : {args.pair} ({info.get('wsname', '')})")
     print(f"Base / Quote    : {info.get('base')} / {info.get('quote')}")
@@ -169,7 +193,9 @@ def cmd_pair_info(args) -> None:
     print(f"Min order cost  : {info.get('costmin', 'n/a')}")
     print(f"Lot decimals    : {info.get('lot_decimals')}  (volume precision)")
     print(f"Pair decimals   : {info.get('pair_decimals')}  (price precision)")
-    print(f"Order types     : {', '.join(sorted(ORDERTYPE_PRICES))}")
+    if args.exchange == "mexc":
+        print("Market buys     : unsupported (MEXC requires a quote budget; use limit buy)")
+    print(f"Order types     : {', '.join(sorted(ORDERTYPE_PRICES)) if args.exchange == 'kraken' else 'limit, market'}")
 
 
 def _print_order_rows(orders: dict) -> None:
@@ -190,7 +216,7 @@ def _print_order_rows(orders: dict) -> None:
 
 
 def cmd_open_orders(args) -> None:
-    api = get_api(args.account)
+    api = get_api(args.account, getattr(args, "pair", None))
     resp = api.query_private("OpenOrders")
     _assert_no_error(resp, "OpenOrders")
     orders = resp["result"].get("open", {})
@@ -199,7 +225,7 @@ def cmd_open_orders(args) -> None:
 
 
 def cmd_closed_orders(args) -> None:
-    api = get_api(args.account)
+    api = get_api(args.account, getattr(args, "pair", None))
     resp = api.query_private("ClosedOrders")
     _assert_no_error(resp, "ClosedOrders")
     closed = resp["result"].get("closed", {})
@@ -210,7 +236,7 @@ def cmd_closed_orders(args) -> None:
 
 
 def cmd_trades(args) -> None:
-    api = get_api(args.account)
+    api = get_api(args.account, getattr(args, "pair", None))
     resp = api.query_private("TradesHistory")
     _assert_no_error(resp, "TradesHistory")
     trades = resp["result"].get("trades", {})
@@ -295,6 +321,9 @@ def _build_api_params(order: dict) -> dict:
 
 def run_preflight(api: krakenex.API, doc: dict) -> None:
     orders = doc["orders"]
+    if isinstance(api, SpotAPI):
+        for order in orders:
+            api.validate_order(order)
     pairs = sorted({o["pair"] for o in orders})
 
     print("=" * 60)
@@ -342,6 +371,8 @@ def run_preflight(api: krakenex.API, doc: dict) -> None:
         print(f"      ✓ {asset}: selling {needed:,f} of {have:,f} available")
     for asset, cost in buy_cost.items():
         have = balances.get(asset, Decimal(0))
+        if isinstance(api, SpotAPI) and have < cost:
+            _abort(f"Insufficient {asset}: estimated buy cost {cost}, available {have}")
         flag = "✓" if have >= cost else "⚠"
         print(f"      {flag} {asset}: buys cost ≈ {cost:,.2f}, available {have:,.2f}"
               + ("" if have >= cost else "  (WARNING: may be insufficient)"))
@@ -405,8 +436,12 @@ def show_orders(doc: dict, heading: str) -> None:
 
 def run_validate(api: krakenex.API, doc: dict) -> None:
     """Server-side dry-run: AddOrder with validate=true places nothing."""
+    if isinstance(api, SpotAPI) and api.validation_mode == "local":
+        print(f"{exchange_name(api)}: local checks passed. Server-side dry-run is unavailable; "
+              "no order submission endpoint was called. Exchange acceptance is unverified.\n")
+        return
     print("=" * 60)
-    print("SERVER VALIDATION — validate=true (no orders placed)")
+    print(f"SERVER VALIDATION — {exchange_name(api)} test/validate endpoint (no orders placed)")
     print("=" * 60)
     failures = 0
     for i, order in enumerate(doc["orders"], 1):
@@ -422,7 +457,7 @@ def run_validate(api: krakenex.API, doc: dict) -> None:
             descr = resp["result"].get("descr", {}).get("order", "")
             print(f"  [{i}/{len(doc['orders'])}] OK      {label}")
             if descr:
-                print(f"        Kraken reads this as: {descr}")
+                print(f"        Exchange reads this as: {descr}")
     print()
     if failures:
         _abort(f"{failures} order(s) failed server validation — nothing was placed")
@@ -439,7 +474,7 @@ def place_live(api: krakenex.API, doc: dict, account: str, source_file: str) -> 
     orders = doc["orders"]
     print("!" * 60)
     print(f"  WARNING: This will place {len(orders)} REAL order(s) on the")
-    print(f"  '{account}' Kraken account.")
+    print(f"  '{account}' {exchange_name(api)} account.")
     print("!" * 60)
     answer = input(f"\nType CONFIRM to place all {len(orders)} orders, "
                    f"or anything else to abort: ")
@@ -463,7 +498,7 @@ def place_live(api: krakenex.API, doc: dict, account: str, source_file: str) -> 
         txid = ", ".join(txids) if txids else None
         descr = resp.get("result", {}).get("descr", {}).get("order", "") if not error else ""
         write_log({
-            "ts": ts, "event": "add_order", "account": account,
+            "ts": ts, "event": "add_order", "account": account, "exchange": exchange_name(api).lower(),
             "source_file": source_file, "label": label, "params": params,
             "txid": txid, "descr": descr,
             "error": error if not error else [str(e) for e in error],
@@ -473,7 +508,7 @@ def place_live(api: krakenex.API, doc: dict, account: str, source_file: str) -> 
             _print_summary(results, orders, failed_at=label)
             sys.exit(1)
         print(f"  Order ID  : {txid or '(no txid returned)'}")
-        print(f"  Status    : open")
+        print("  Status    : submission accepted (check orders/trades for final status)")
         print(f"  Timestamp : {ts}")
         results.append({"label": label, "txid": txid, "order": order})
 
@@ -499,8 +534,12 @@ def _print_summary(results: list, orders: list, failed_at=None) -> None:
 
 
 def cmd_place(args) -> None:
-    api = get_api(args.account)
+    api = get_api(args.account, getattr(args, "pair", None))
     doc = load_order_file(args.file, args.account)
+    target_exchange = getattr(api, "exchange", "kraken")
+    if doc.get("exchange", "kraken") != target_exchange:
+        _abort("Exchange mismatch: order file and account must target the same exchange. "
+               "New exchange order files require an explicit exchange field.")
     if doc.get("description"):
         print(f"Order file : {args.file}")
         print(f"Description: {doc['description']}\n")
@@ -508,14 +547,14 @@ def cmd_place(args) -> None:
     run_preflight(api, doc)
 
     if not args.live:
-        show_orders(doc, "DRY-RUN — Orders that WOULD be sent to Kraken")
+        show_orders(doc, f"DRY-RUN — Orders that WOULD be sent to {exchange_name(api)}")
         run_validate(api, doc)
         print("Dry-run complete. Nothing was placed.")
         print(f"To place for real, run:\n"
               f"  python3 kraken.py place {args.file} --account {args.account} --live")
         return
 
-    show_orders(doc, "LIVE MODE — Orders to be placed on Kraken")
+    show_orders(doc, f"LIVE MODE — Orders to be placed on {exchange_name(api)}")
     place_live(api, doc, args.account, args.file)
 
 
@@ -531,16 +570,20 @@ def _quantize_price(value: Decimal, decimals: int) -> Decimal:
     return value.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_EVEN)
 
 
-def allocate_volumes(total: Decimal, weights: list, lot_decimals: int) -> list:
+def allocate_volumes(total: Decimal, weights: list, lot_decimals: int, lot_step=None) -> list:
     """Split total into len(weights) shares proportional to weights.
     Exact: sum(shares) == total, every share on the lot grid.
     Remainder goes to the largest fractional parts first (largest-remainder)."""
-    quantum = Decimal(1).scaleb(-lot_decimals)
+    quantum = Decimal(str(lot_step)) if lot_step else Decimal(1).scaleb(-lot_decimals)
+    if not total.is_finite() or total <= 0 or not weights:
+        _abort("Total volume and number of slices must be positive")
+    if any(not w.is_finite() or w <= 0 for w in weights):
+        _abort("Every allocation weight must be finite and positive")
     if total % quantum != 0:
         _abort(f"Total volume {total} is not a multiple of the lot size {quantum}")
     wsum = sum(weights)
     raw = [total * w / wsum for w in weights]
-    shares = [r.quantize(quantum, rounding=ROUND_DOWN) for r in raw]
+    shares = [(r / quantum).to_integral_value(rounding=ROUND_DOWN) * quantum for r in raw]
     remainder = total - sum(shares)
     order = sorted(range(len(raw)), key=lambda i: raw[i] - shares[i], reverse=True)
     i = 0
@@ -562,7 +605,13 @@ def _parse_offset_pct(offset: str) -> Decimal:
 
 
 def _write_order_doc(args, orders: list, description: str) -> None:
+    exchange = account_config(args.account).get("exchange", "kraken")
+    if exchange != "kraken":
+        api = get_public_api(exchange)
+        for order in orders:
+            api.validate_order(order)
     doc = {
+        "exchange": exchange,
         "version": 1,
         "account": args.account,
         "description": description,
@@ -595,7 +644,7 @@ def _print_split_table(rows: list, total: Decimal) -> None:
 
 
 def cmd_split_ladder(args) -> None:
-    api = get_public_api()
+    api = split_api(args)
     info = fetch_pair_info(api, [args.pair])[args.pair]
     lot_decimals = int(info["lot_decimals"])
     pair_decimals = int(info["pair_decimals"])
@@ -612,7 +661,9 @@ def cmd_split_ladder(args) -> None:
         if levels < 2:
             _abort("--levels must be at least 2 (use split iceberg/chunk for one order)")
         step = (end - start) / (levels - 1)
-        prices = [_quantize_price(start + step * i, pair_decimals) for i in range(levels)]
+        tick = Decimal(str(info.get("price_step", Decimal(1).scaleb(-pair_decimals))))
+        prices = [((start + step * i) / tick).to_integral_value(rounding=ROUND_HALF_EVEN) * tick
+                  for i in range(levels)]
 
     for p in prices:
         p_str = format(p, "f")
@@ -627,7 +678,7 @@ def cmd_split_ladder(args) -> None:
         weights = [Decimal(1)] * levels
 
     total = Decimal(args.total_volume)
-    shares = allocate_volumes(total, weights, lot_decimals)
+    shares = allocate_volumes(total, weights, lot_decimals, info.get("lot_step"))
     for i, share in enumerate(shares):
         if share < order_min:
             _abort(f"Level {i + 1} volume {share} is below pair minimum {order_min} — "
@@ -666,13 +717,13 @@ def cmd_split_ladder(args) -> None:
 
 
 def cmd_split_chunk(args) -> None:
-    api = get_public_api()
+    api = split_api(args)
     info = fetch_pair_info(api, [args.pair])[args.pair]
     lot_decimals = int(info["lot_decimals"])
     order_min = Decimal(str(info.get("ordermin", "0")))
 
     total = Decimal(args.total_volume)
-    shares = allocate_volumes(total, [Decimal(1)] * args.chunks, lot_decimals)
+    shares = allocate_volumes(total, [Decimal(1)] * args.chunks, lot_decimals, info.get("lot_step"))
     for i, share in enumerate(shares):
         if share < order_min:
             _abort(f"Chunk {i + 1} volume {share} is below pair minimum {order_min}")
@@ -698,7 +749,9 @@ def cmd_split_chunk(args) -> None:
 
 
 def cmd_split_iceberg(args) -> None:
-    api = get_public_api()
+    api = split_api(args)
+    if isinstance(api, SpotAPI):
+        _abort("Iceberg orders are currently supported only on Kraken")
     info = fetch_pair_info(api, [args.pair])[args.pair]
     order_min = Decimal(str(info.get("ordermin", "0")))
 
@@ -735,7 +788,7 @@ def cmd_split_iceberg(args) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_cancel(args) -> None:
-    api = get_api(args.account)
+    api = get_api(args.account, getattr(args, "pair", None))
     resp = api.query_private("QueryOrders", {"txid": ",".join(args.txids)})
     _assert_no_error(resp, "QueryOrders")
     found = resp["result"]
@@ -753,25 +806,27 @@ def cmd_cancel(args) -> None:
         error = resp.get("error") or None
         write_log({
             "ts": _utc_now(), "event": "cancel_order", "account": args.account,
+            "exchange": exchange_name(api).lower(), "pair": getattr(args, "pair", None),
             "txid": txid,
             "error": error if not error else [str(e) for e in error],
         })
         if error:
             print(f"  FAILED  {txid}: {error}")
         else:
-            print(f"  OK      {txid} cancelled")
+            print(f"  OK      {txid} cancellation accepted")
 
 
 def cmd_cancel_all(args) -> None:
-    api = get_api(args.account)
+    api = get_api(args.account, getattr(args, "pair", None))
     resp = api.query_private("OpenOrders")
     _assert_no_error(resp, "OpenOrders")
     orders = resp["result"].get("open", {})
     if not orders:
         print("No open orders to cancel.")
         return
-    print(f"This will cancel ALL {len(orders)} open order(s) on "
-          f"'{args.account}':\n")
+    scope = "the displayed" if isinstance(api, SpotAPI) else "ALL"
+    print(f"This will cancel {scope} {len(orders)} open order(s) on "
+          f"'{args.account}' ({exchange_name(api)}, pair={getattr(args, 'pair', None) or 'all'}):\n")
     _print_order_rows(orders)
     answer = input("\nType CONFIRM to cancel all of these orders: ")
     if answer.strip() != "CONFIRM":
@@ -781,11 +836,12 @@ def cmd_cancel_all(args) -> None:
     error = resp.get("error") or None
     write_log({
         "ts": _utc_now(), "event": "cancel_all", "account": args.account,
+        "exchange": exchange_name(api).lower(), "pair": getattr(args, "pair", None),
         "count": resp.get("result", {}).get("count"),
         "error": error if not error else [str(e) for e in error],
     })
     _assert_no_error(resp, "CancelAll")
-    print(f"Cancelled {resp['result'].get('count', '?')} order(s).")
+    print(f"Cancellation accepted for {resp['result'].get('count', '?')} order(s); check open-orders.")
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +856,7 @@ def _add_account_arg(p: argparse.ArgumentParser) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="kraken.py",
-        description="Kraken trading CLI — dry-run by default, --live requires CONFIRM.",
+        description="Kraken / Bybit / MEXC / OKX spot trading CLI — dry-run by default, --live requires CONFIRM.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -810,24 +866,29 @@ def main() -> None:
 
     p = sub.add_parser("ticker", help="Show current prices (public)")
     p.add_argument("pairs", nargs="+", metavar="PAIR")
+    p.add_argument("--exchange", choices=EXCHANGES, default="kraken")
     p.set_defaults(func=cmd_ticker)
 
     p = sub.add_parser("pair-info", help="Show pair minimums and precision (public)")
     p.add_argument("pair", metavar="PAIR")
+    p.add_argument("--exchange", choices=EXCHANGES, default="kraken")
     p.set_defaults(func=cmd_pair_info)
 
     p = sub.add_parser("open-orders", help="List open orders")
     _add_account_arg(p)
+    p.add_argument("--pair", help="Scope to a spot pair; required for MEXC history and cancels")
     p.set_defaults(func=cmd_open_orders)
 
     p = sub.add_parser("closed-orders", help="List recent closed orders")
     _add_account_arg(p)
     p.add_argument("--count", type=int, default=20)
+    p.add_argument("--pair", help="Scope to a spot pair; required for MEXC history and cancels")
     p.set_defaults(func=cmd_closed_orders)
 
     p = sub.add_parser("trades", help="List recent fills")
     _add_account_arg(p)
     p.add_argument("--count", type=int, default=20)
+    p.add_argument("--pair", help="Scope to a spot pair; required for MEXC history and cancels")
     p.set_defaults(func=cmd_trades)
 
     p = sub.add_parser("place", help="Place orders from a JSON order file "
@@ -887,17 +948,21 @@ def main() -> None:
     p = sub.add_parser("cancel", help="Cancel order(s) by TxID")
     p.add_argument("txids", nargs="+", metavar="TXID")
     _add_account_arg(p)
+    p.add_argument("--pair", help="Scope to a spot pair; required for MEXC history and cancels")
     p.set_defaults(func=cmd_cancel)
 
     p = sub.add_parser("cancel-all", help="Cancel ALL open orders on an account")
     _add_account_arg(p)
+    p.add_argument("--pair", help="Scope to a spot pair; required for MEXC history and cancels")
     p.set_defaults(func=cmd_cancel_all)
 
     args = parser.parse_args()
     try:
         args.func(args)
-    except (ConnectionError, TimeoutError, OSError) as e:
-        _abort(f"Network error talking to Kraken: {e}")
+    except (ConnectionError, TimeoutError, OSError):
+        _abort("Exchange connection failed. Check connectivity; inspect orders before retrying a live action.")
+    except (ValueError, InvalidOperation) as e:
+        _abort(str(e))
 
 
 if __name__ == "__main__":

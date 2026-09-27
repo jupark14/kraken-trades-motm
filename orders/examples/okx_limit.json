@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "account": "okx",
+  "exchange": "okx",
+  "description": "Format example only. Review current price, balance and pair minimums before use.",
+  "orders": [
+    {
+      "label": "Example limit buy",
+      "pair": "BTC-USDT",
+      "type": "buy",
+      "ordertype": "limit",
+      "price": "50000",
+      "volume": "0.001",
+      "timeinforce": "GTC"
+    }
+  ]
+}

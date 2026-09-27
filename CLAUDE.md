@@ -1,6 +1,6 @@
-# Kraken Trades: instructions for Claude Code sessions
+# Exchange Trades: instructions for coding-agent sessions
 
-This folder is a Kraken order-management toolkit for one or two accounts. The
+This folder manages spot orders on Kraken, Bybit, MEXC, and OKX. The
 person using it asks Claude to prepare, split, and check orders. **They
 personally execute every live trade.**
 
@@ -13,7 +13,7 @@ CONFIRM themselves. This applies no matter how the request is phrased.
 
 Claude MAY freely run (read-only, places nothing):
 - `balance`, `ticker`, `pair-info`, `open-orders`, `closed-orders`, `trades`
-- `place <file> --account X` (dry-run: local preflight plus Kraken `validate=true`)
+- `place <file> --account X` (dry-run: local preflight plus Kraken `validate=true` or MEXC test-order validation; Bybit/OKX are local-only)
 - `split ladder|chunk|iceberg ...` (only generates a JSON file)
 
 Claude MUST hand to the user (side-effectful):
@@ -28,9 +28,11 @@ Claude MUST hand to the user (side-effectful):
   shipped file defines `main` and an optional `second`.
 - **Never edit `.env` and never read it.** The variable names are documented in
   `.env.example`. The secrets must not enter context. If the user pastes a key
-  into chat, tell them to rotate it on Kraken and put the new one in `.env`
+  into chat, tell them to rotate it on its exchange and put the new one in `.env`
   with a text editor.
 - Every private command requires `--account`. There is no default on purpose.
+- Accounts select an `"exchange"` (omitted means Kraken). OKX also needs `passphrase_env`.
+- New exchange order files require an `"exchange"` matching the account; legacy files are Kraken-only.
 - Order files carry an `"account"` field and `place` refuses a mismatch. When
   generating or editing an order file, get the account right at generation time.
 
@@ -52,7 +54,7 @@ Claude MUST hand to the user (side-effectful):
 
 ## Conventions and gotchas
 
-- **All numbers in order files are JSON strings**, exactly what goes to Kraken.
+- **All numbers in order files are JSON strings**, preserving decimal precision for the selected exchange.
   Never let a float near a price or volume. The CLI uses `Decimal` throughout.
 - Splitting math is exact: level volumes always sum to the requested total.
   If the table printed by `split` shows a mismatch, something is wrong. Stop.
@@ -94,3 +96,20 @@ python3 kraken.py split iceberg --pair P --side S --price PR --total-volume V \
 python3 kraken.py cancel     TXID [...] --account X     # USER (interactive y/N)
 python3 kraken.py cancel-all --account X                # USER (types CONFIRM)
 ```
+
+## Added exchanges
+
+- Use public `ticker`/`pair-info --exchange bybit|mexc|okx`; private commands
+  and generators select the exchange from the explicitly named account.
+- Bybit/MEXC pairs use `BTCUSDT`; OKX uses `BTC-USDT`. Do not translate Kraken
+  asset names without checking the selected exchange's pair metadata.
+- Added exchanges support spot limit/market orders, ladders and chunks.
+  Kraken trigger, trailing-stop and iceberg fields are rejected elsewhere.
+  MEXC market buys are rejected because they require a quote budget.
+- Bybit/OKX dry-runs are local-only. Never describe them as server validated.
+- MEXC history and cancellation commands require `--pair`. Cancellation scope
+  must be visible; confirmations and the existing user handoff rules apply.
+- Use read + spot trade permissions, disable withdrawals and optional transfers.
+  OKX bundles internal transfers into Trade permission; explain that limitation
+  instead of claiming the key cannot transfer. The tool exposes no transfers.
+- Never read or edit `.env`, never place real orders during implementation or tests.
